@@ -3,107 +3,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Mail, User, Building2, MapPin, Globe, RefreshCw, Copy,
-  ShieldAlert, Sparkles, Repeat, Bot, Info, ListOrdered, CheckCircle2, AtSign
+  Bot, Info, ListOrdered, CheckCircle2
 } from 'lucide-react';
 
-const ZAF_SDK_URL = 'https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js';
-const API_BASE = 'https://jsonplaceholder.typicode.com';
+import Toolbar from '@/components/Toolbar.jsx';
+import StateInfo from '@/components/StateInfo.jsx';
+import { TicketSkeleton, CustomerSkeleton } from '@/components/Skeletons.jsx';
+import MissingEmailPanel from '@/components/MissingEmailPanel.jsx';
+import Toast from '@/components/Toast.jsx';
 
-// Common test emails from JSONPlaceholder (you can type your own too)
-const TEST_EMAILS = [
-  'Sincere@april.biz',
-  'Shanna@melissa.tv',
-  'Nathan@yesenia.net',
-  'Julianne.OConner@kory.org',
-  'Lucio_Hettinger@annie.ca',
-  'Karley_Dach@jasper.info',
-  'Telly.Hoeger@billy.biz',
-  'Sherwood@rosamond.me',
-  'Chaim_McDermott@dana.io',
-  'Rey.Padberg@karina.biz'
-];
-
-function loadZAF() {
-  return new Promise((resolve) => {
-    if (typeof window === 'undefined') return resolve(null);
-    if (window.ZAFClient) return resolve(window.ZAFClient);
-    const s = document.createElement('script');
-    s.src = ZAF_SDK_URL;
-    s.async = true;
-    s.onload = () => resolve(window.ZAFClient || null);
-    s.onerror = () => resolve(null);
-    document.body.appendChild(s);
-  });
-}
-
-function trim(text, max = 240) {
-  if (!text) return '';
-  const t = String(text);
-  return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t;
-}
-
-function pickLast3Titles(posts) {
-  if (!Array.isArray(posts)) return [];
-  const sorted = [...posts].sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-  return sorted.slice(0, 3).map((p) => p.title || '');
-}
-
-function genReply({ tone = 'friendly', ticket, user, posts }) {
-  const name = user?.name || 'there';
-  const company = user?.company?.name || 'your company';
-  const city = user?.address?.city || '';
-  const subj = ticket?.subject || 'your request';
-  const desc = trim(ticket?.description || '', 160);
-
-  const last3 = posts?.length ? ` I also glanced at your recent posts (${posts.join('; ')}).` : '';
-
-  if (tone === 'concise') {
-    return [
-      `Hi ${name},`,
-      `Thanks for contacting us about "${subj}".`,
-      desc ? `Context noted: ${desc}` : undefined,
-      `I’ve reviewed your account for ${company}${city ? ` in ${city}` : ''}.${last3}`,
-      `Next steps:`,
-      `• I can clarify the issue and propose a fix.`,
-      `• Please confirm any extra details or screenshots.`,
-      ``,
-      `Best,`,
-      `Support`
-    ].filter(Boolean).join('\n');
-  }
-
-  // friendly
-  return [
-    `Hi ${name},`,
-    `Thanks so much for reaching out about “${subj}”.`,
-    desc ? `I read your note: ${desc}` : undefined,
-    `I took a quick look at your ${company} account${city ? ` in ${city}` : ''}.${last3}`,
-    `Here’s what I can do next:`,
-    `• Review the details and suggest the quickest fix`,
-    `• Share clear steps or make changes on your behalf if needed`,
-    ``,
-    `If you can, please confirm any extra context or screenshots so I can move faster.`,
-    ``,
-    `Warm regards,`,
-    `Support`
-  ].filter(Boolean).join('\n');
-}
-
-async function fetchJSON(url, signal) {
-  const res = await fetch(url, { signal, headers: { 'Accept': 'application/json' } });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} ${res.statusText}${text ? ` — ${text}` : ''}`);
-  }
-  return res.json();
-}
-
-const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+import { loadZAF } from '@/lib/zaf.js';
+import { fetchJSON, fetchUserByEmail } from '@/lib/api.js';
+import { genReply, pickLast3Titles } from '@/lib/reply.js';
+import { trim } from '@/lib/strings.js';
+import { API_BASE, emailRegex, sanitizeEmail } from '@/lib/constants.js';
 
 export default function App() {
+  // zafEnv: 'unknown' | 'zaf' | 'local'
+  const [zafEnv, setZafEnv] = useState('unknown');
   const [clientReady, setClientReady] = useState(false);
-  const [ticket, setTicket] = useState({ email: '', subject: '', description: '' });
 
+  const [ticket, setTicket] = useState({ email: '', subject: '', description: '' });
   const [user, setUser] = useState(null);
   const [posts, setPosts] = useState([]);
   const [state, setState] = useState('idle'); // idle | loading | ready | error | notfound | missing
@@ -117,7 +37,7 @@ export default function App() {
   const toastTimer = useRef(null);
   const abortRef = useRef(null);
 
-  // Restore last manual email for faster testing
+  // Restore last manual email (local mode convenience)
   useEffect(() => {
     try {
       const saved = localStorage.getItem('zsa_manual_email');
@@ -125,8 +45,7 @@ export default function App() {
     } catch {}
   }, []);
 
-  // Read ticket data via ZAF if possible, else fallback to URL params or mock.
-  // Optionally override with a provided email (manual testing mode).
+  // Core flow
   const readTicket = useCallback(async (overrideEmail) => {
     setState('loading');
     setError('');
@@ -145,27 +64,35 @@ export default function App() {
       if (ZAF) {
         try {
           const client = ZAF.init();
-          setClientReady(true);
           const fields = await client.get([
             'ticket.requester.email',
             'ticket.subject',
             'ticket.description'
           ]);
+          // Mark we are truly in ZAF only after a successful client.get
+          setClientReady(true);
+          setZafEnv('zaf');
+
           t = {
             email: fields['ticket.requester.email'] || '',
             subject: fields['ticket.subject'] || '',
             description: fields['ticket.description'] || ''
           };
         } catch {
-          // Fall through to local mode
+          // ZAF present but not usable; treat as local
+          setClientReady(false);
+          setZafEnv('local');
         }
+      } else {
+        // No ZAF available at all (local/dev)
+        setClientReady(false);
+        setZafEnv('local');
       }
 
       if (!t) {
-        // No ZAF (local dev). Use URL params or sensible defaults
         const params = new URLSearchParams(window.location.search);
         t = {
-          email: params.get('email') || manualEmail || 'Sincere@april.biz',
+          email: params.get('email') || manualEmail || '',
           subject: params.get('subject') || 'Help with my account',
           description:
             params.get('description') ||
@@ -173,14 +100,12 @@ export default function App() {
         };
       }
 
-      // Apply explicit override (from Test Email control)
-      if (overrideEmail) {
-        t.email = overrideEmail;
-      }
-
+      if (overrideEmail) t.email = overrideEmail;
+      t.email = sanitizeEmail(t.email);
       setTicket(t);
 
       if (!t.email) {
+        // No email available yet: enter Missing state, render helper UI to collect email
         setUser(null);
         setPosts([]);
         setReply(genReply({ tone, ticket: t, user: null, posts: [] }));
@@ -188,12 +113,7 @@ export default function App() {
         return;
       }
 
-      // Fetch user by email
-      const userList = await fetchJSON(
-        `${API_BASE}/users?email=${encodeURIComponent(t.email)}`,
-        controller.signal
-      );
-      const found = Array.isArray(userList) && userList[0] ? userList[0] : null;
+      const found = await fetchUserByEmail(API_BASE, t.email, controller.signal);
       if (!found) {
         setUser(null);
         setPosts([]);
@@ -203,12 +123,17 @@ export default function App() {
       }
       setUser(found);
 
-      // Fetch last 3 post titles
-      const userPosts = await fetchJSON(
-        `${API_BASE}/posts?userId=${encodeURIComponent(found.id)}`,
-        controller.signal
-      );
-      const last3 = pickLast3Titles(userPosts);
+      // Fetch last 3 post titles (non-fatal if it fails)
+      let last3 = [];
+      try {
+        const userPosts = await fetchJSON(
+          `${API_BASE}/posts?userId=${encodeURIComponent(found.id)}`,
+          controller.signal
+        );
+        last3 = pickLast3Titles(userPosts);
+      } catch {
+        last3 = [];
+      }
       setPosts(last3);
 
       setReply(genReply({ tone, ticket: t, user: found, posts: last3 }));
@@ -219,8 +144,10 @@ export default function App() {
       setState('error');
     } finally {
       abortRef.current = null;
+      // Ensure env is at least determined
+      if (zafEnv === 'unknown') setZafEnv(clientReady ? 'zaf' : 'local');
     }
-  }, [manualEmail, tone]);
+  }, [manualEmail, tone, zafEnv, clientReady]);
 
   useEffect(() => {
     readTicket();
@@ -229,7 +156,7 @@ export default function App() {
     };
   }, [readTicket]);
 
-  // Regenerate reply when tone changes and we have data
+  // Regenerate reply on tone change
   useEffect(() => {
     if (state === 'ready' || state === 'notfound' || state === 'missing') {
       setReply(genReply({ tone, ticket, user, posts }));
@@ -255,13 +182,14 @@ export default function App() {
     }
   }, [reply]);
 
-  // Keyboard shortcuts for power users
+  // Shortcuts
   useEffect(() => {
     const onKey = (e) => {
       if (e.ctrlKey || e.metaKey) {
-        if (e.key.toLowerCase() === 'r') { e.preventDefault(); readTicket(); }
-        if (e.key.toLowerCase() === 'g') { e.preventDefault(); setReply(genReply({ tone, ticket, user, posts })); }
-        if (e.key.toLowerCase() === 'c') { e.preventDefault(); copyToClipboard(); }
+        const k = e.key.toLowerCase();
+        if (k === 'r') { e.preventDefault(); readTicket(); }
+        if (k === 'g') { e.preventDefault(); setReply(genReply({ tone, ticket, user, posts })); }
+        if (k === 'c') { e.preventDefault(); copyToClipboard(); }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -275,21 +203,26 @@ export default function App() {
   ]), [ticket]);
 
   const disabled = state === 'loading';
-  const localMode = !clientReady;
+  const modeReady = zafEnv !== 'unknown';
+  const localMode = zafEnv === 'local';
 
-  const applyTestEmail = useCallback(() => {
-    if (!manualEmail) {
+  // Accept optional email to apply directly (used by quick-pick or MissingEmailPanel)
+  const applyTestEmail = useCallback((emailMaybe) => {
+    const em = sanitizeEmail(emailMaybe || manualEmail);
+    if (!em) {
       setEmailError('Please enter a test email');
       return;
     }
-    if (!emailRegex.test(manualEmail)) {
+    if (!emailRegex.test(em)) {
       setEmailError('Enter a valid email address');
       return;
     }
-    try { localStorage.setItem('zsa_manual_email', manualEmail); } catch {}
+    try { localStorage.setItem('zsa_manual_email', em); } catch {}
+    setManualEmail(em);
     setEmailError('');
-    showToast(`Using test email: ${manualEmail}`);
-    readTicket(manualEmail);
+    showToast(`Using email: ${em}`);
+    // Trigger the full fetch flow for the provided email
+    readTicket(em);
   }, [manualEmail, readTicket]);
 
   return (
@@ -312,7 +245,9 @@ export default function App() {
         setTone={setTone}
         onRefresh={() => readTicket()}
         loading={state === 'loading'}
-        localMode={localMode}
+        // Show email controls if either local mode or we're missing an email
+        modeReady={modeReady}
+        localMode={localMode || state === 'missing'}
         manualEmail={manualEmail}
         setManualEmail={setManualEmail}
         onApplyEmail={applyTestEmail}
@@ -343,18 +278,29 @@ export default function App() {
         {state === 'loading' && <CustomerSkeleton />}
 
         {state === 'missing' && (
-          <StateInfo
-            kind="warn"
-            title="Requester email missing"
-            message="Cannot look up a customer without an email address."
-          />
+          <>
+            <StateInfo
+              kind="warn"
+              title="Requester email missing"
+              message="Enter an email below to look up the customer profile and posts."
+            />
+            <div style={{ marginTop: 10 }}>
+              <MissingEmailPanel
+                value={manualEmail}
+                setValue={setManualEmail}
+                onApply={applyTestEmail}
+                error={emailError}
+                disabled={disabled}
+              />
+            </div>
+          </>
         )}
 
         {state === 'notfound' && (
           <StateInfo
             kind="warn"
             title="Customer not found"
-            message="No user matched this email on the public API."
+            message="No user matched this email on the public API. Try a different test email."
           />
         )}
 
@@ -368,7 +314,7 @@ export default function App() {
           />
         )}
 
-        {(state === 'ready' || state === 'notfound' || state === 'missing') && (
+        {(state === 'ready' || state === 'notfound') && (
           <div className="row cols-2">
             <div>
               <div className="badge"><User size={14} aria-hidden="true" /> {user?.name || '—'}</div>
@@ -403,16 +349,16 @@ export default function App() {
         <div className="btn-row" style={{ marginBottom: 8 }}>
           <button
             className="btn"
-            disabled={disabled}
+            disabled={state === 'loading'}
             onClick={() => setReply(genReply({ tone, ticket, user, posts }))}
             aria-label="Regenerate reply"
             title="Regenerate reply (Ctrl/Cmd + G)"
           >
-            <Repeat size={16} /> Regenerate
+            <RefreshCw size={16} style={{ transform: 'rotate(-90deg)' }} /> Regenerate
           </button>
           <button
             className="btn"
-            disabled={disabled || copying}
+            disabled={state === 'loading' || copying}
             onClick={copyToClipboard}
             aria-label="Copy reply to clipboard"
             title="Copy to clipboard (Ctrl/Cmd + C)"
@@ -421,7 +367,7 @@ export default function App() {
           </button>
           <button
             className="btn"
-            disabled={disabled}
+            disabled={state === 'loading'}
             onClick={() => readTicket()}
             aria-label="Refresh data"
             data-busy={state === 'loading' ? 'true' : 'false'}
@@ -448,142 +394,5 @@ export default function App() {
 
       <Toast message={toast} />
     </div>
-  );
-}
-
-function Toolbar({
-  tone, setTone, onRefresh, loading,
-  localMode, manualEmail, setManualEmail, onApplyEmail, emailError
-}) {
-  const onKeyDown = (e) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      onApplyEmail();
-    }
-  };
-
-  return (
-    <div className="toolbar" role="group" aria-label="App toolbar">
-      <div className="seg" role="group" aria-label="Tone selector">
-        <button
-          className={`seg-item ${tone === 'friendly' ? 'active' : ''}`}
-          onClick={() => setTone('friendly')}
-          aria-pressed={tone === 'friendly'}
-          title="Friendly tone"
-        >
-          <Sparkles size={14} /> Friendly
-        </button>
-        <button
-          className={`seg-item ${tone === 'concise' ? 'active' : ''}`}
-          onClick={() => setTone('concise')}
-          aria-pressed={tone === 'concise'}
-          title="Concise tone"
-        >
-          <ShieldAlert size={14} /> Concise
-        </button>
-      </div>
-
-      {localMode && (
-        <div className="field" style={{ minWidth: 0 }}>
-          <label htmlFor="testEmail" className="field-label">Test email</label>
-          <div className="input-wrap">
-            <AtSign size={14} aria-hidden="true" className="input-icon" />
-            <input
-              id="testEmail"
-              className={`input ${emailError ? 'input-error' : ''}`}
-              type="email"
-              list="testEmails"
-              placeholder="e.g. Sincere@april.biz"
-              value={manualEmail}
-              onChange={(e) => setManualEmail(e.target.value)}
-              onKeyDown={onKeyDown}
-              autoCapitalize="none"
-              autoCorrect="off"
-            />
-            <datalist id="testEmails">
-              {TEST_EMAILS.map((em) => <option key={em} value={em} />)}
-            </datalist>
-            <button className="btn" type="button" onClick={onApplyEmail} title="Fetch user for this email">
-              Fetch
-            </button>
-          </div>
-          {emailError ? <div className="field-help error">{emailError}</div> : (
-            <div className="field-help">Local mode only. Choose from presets or type any email, then press Fetch.</div>
-          )}
-        </div>
-      )}
-
-      <div className="grow" />
-
-      <button
-        className="btn"
-        onClick={onRefresh}
-        disabled={loading}
-        data-busy={loading ? 'true' : 'false'}
-        aria-label="Refresh data"
-        title="Refresh data"
-      >
-        <RefreshCw className="rotate-if-busy" size={16} /> {loading ? 'Refreshing…' : 'Refresh'}
-      </button>
-    </div>
-  );
-}
-
-function StateInfo({ kind = 'warn', title, message, actionLabel, onAction }) {
-  const Icon = kind === 'error' ? ShieldAlert : Info;
-
-  return (
-    <div className={`alert ${kind === 'error' ? 'alert-error' : 'alert-warn'}`} role="status" aria-live="polite">
-      <div className="alert-title"><Icon size={16} aria-hidden="true" /> {title}</div>
-      <div className="alert-msg">{message}</div>
-      {actionLabel && onAction && (
-        <div className="alert-actions">
-          <button className="btn" onClick={onAction}>
-            <RefreshCw size={16} /> {actionLabel}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TicketSkeleton() {
-  return (
-    <>
-      <div className="skel line lg" />
-      <div className="skel line" />
-      <div className="skel line" />
-    </>
-  );
-}
-
-function CustomerSkeleton() {
-  return (
-    <div className="row cols-2">
-      <div>
-        <div className="skel line" style={{ width: '60%', height: 20, borderRadius: 10 }} />
-        <div className="skel line" />
-        <div className="skel line sm" />
-        <div className="skel line" />
-      </div>
-      <div>
-        <div className="skel line" />
-        <div className="skel line sm" />
-        <div className="skel line" />
-      </div>
-    </div>
-  );
-}
-
-function Toast({ message }) {
-  return (
-    <>
-      <div className="sr-only" aria-live="polite" role="status">{message}</div>
-      {message ? (
-        <div className="toast">
-          {message}
-        </div>
-      ) : null}
-    </>
   );
 }
