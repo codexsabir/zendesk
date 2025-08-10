@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://static.zdassets.com 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://jsonplaceholder.typicode.com; frame-ancestors 'self';"
+    />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Zendesk Sidebar App</title>
+    <style>
+      html, body, iframe { height: 100%; width: 100%; margin: 0; background: #0b0f16; }
+      .boot {
+        display: grid; place-items: center; height: 100%; color: #cbd5e1; font: 14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      }
+      .boot .tip { opacity: .7; font-size: 12px; margin-top: 6px }
+    </style>
+    <script src="https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js"></script>
+  </head>
+  <body>
+    <div id="mount" class="boot">
+      <div>
+        <div>Loading app…</div>
+        <div class="tip">If this takes long, ensure the Next.js server is running.</div>
+      </div>
+    </div>
+    <script>
+      // In production, serve the built Next app from the same origin path `/`
+      // In development, you can set NEXT_APP_URL param on installation, or rely on relative path.
+      var target = (new URLSearchParams(location.search).get('nextUrl')) || '/';
+      var iframe = document.createElement('iframe');
+      iframe.src = target;
+      iframe.style.border = '0';
+      iframe.allow = 'clipboard-write';
+      iframe.title = 'Sidebar App';
+      document.body.innerHTML = '';
+      document.body.appendChild(iframe);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "name": "Zendesk Public API Mini",
+  "author": "Your Name",
+  "version": "1.0.0",
+  "frameworkVersion": "2.0",
+  "singleInstall": true,
+  "defaultLocale": "en",
+  "location": {
+    "support": {
+      "ticket_sidebar": {
+        "url": "assets/index.html"
+      }
+    }
+  },
+  "content_security_policy": "default-src 'self'; script-src 'self' https://static.zdassets.com 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://jsonplaceholder.typicode.com; frame-ancestors 'self';",
+  "requirementsOnly": false
+}
